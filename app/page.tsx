@@ -156,31 +156,49 @@ const ToolbarButton: FC<ToolbarButtonProps> = ({
   </button>
 );
 const handleEnter = (e: React.KeyboardEvent<HTMLDivElement>) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
+  if (e.key !== "Enter") return;
 
-    document.execCommand("formatBlock", false, "P");
+  e.preventDefault();
 
-    // Move cursor into new paragraph
-    const sel = window.getSelection();
-    if (!sel) return;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
 
-    const range = sel.getRangeAt(0);
-    range.collapse(false);
+  const range = sel.getRangeAt(0);
+
+  // Create a new paragraph block
+  const newP = document.createElement("p");
+  newP.innerHTML = "<br>";
+
+  // Insert it after the current block
+  const currentNode =
+    range.startContainer.nodeType === 3
+      ? range.startContainer.parentElement
+      : (range.startContainer as HTMLElement);
+
+  let parentBlock = currentNode;
+  while (parentBlock && parentBlock !== e.currentTarget) {
+    if (["P", "DIV", "H1", "H2"].includes(parentBlock.nodeName)) break;
+    parentBlock = parentBlock.parentElement as HTMLElement;
+  }
+
+  if (parentBlock && parentBlock.parentNode) {
+    parentBlock.parentNode.insertBefore(newP, parentBlock.nextSibling);
+
+    // Move cursor into the new paragraph
+    const newRange = document.createRange();
+    newRange.setStart(newP, 0);
+    newRange.collapse(true);
+
     sel.removeAllRanges();
-    sel.addRange(range);
+    sel.addRange(newRange);
   }
 };
 
+
 const App: FC = () => {
   const defaultContent = `
-    <h1>Flexee Manual Introduction</h1>
-    <p>Welcome to the documentation. This is a live example.</p>
-    <h1>Chapter 1: Configuration</h1>
-    <p>To start the server, run <code>npm start</code> on port 8080.</p>
-    <h1>Chapter 3: Troubleshooting</h1>
-    <p>If the server fails, ensure port 3000 is open.</p>
-    <p><i>(Note: This contradicts Chapter 1 which says port 8080. The AI Auditor should catch this!)</i></p>
+    <h4 classname> Loading... </h4>
+    <p> Please wait while we load your content. </p>
   `;
 
   // --- Core State ---
@@ -748,14 +766,14 @@ const App: FC = () => {
                   <button
                     onClick={handleSignUp}
                     disabled={authLoading}
-                    className="px-2 py-1 text-xs rounded bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-600"
+                    className="px-2 py-1 text-xs rounded bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-600 w-30"
                   >
                     Sign Up
                   </button>
                   <button
                     onClick={handleGoogleLogin}
                     disabled={authLoading}
-                    className="px-2 py-1 text-xs rounded bg-red-600 hover:bg-red-700 text-white w-full mt-1">
+                    className="px-2 py-1 text-xs rounded bg-red-600 hover:bg-red-700 text-white w-full ">
                     Continue with Google
                   </button>
 
