@@ -24,3 +24,9 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+[contenteditable] {
+  direction: ltr !important;
+  unicode-bidi: plaintext !important;
+  text-align: left;
+}
