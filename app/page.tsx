@@ -44,6 +44,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 
+
 // --- Debounce function ---
 const debounce = (func: Function, wait: number) => {
   let timeout: NodeJS.Timeout;
@@ -353,43 +354,54 @@ const App: FC = () => {
     []
   );
 
-  // --- Firestore Listener with improved cursor handling ---
-  useEffect(() => {
-    const ref = doc(db, 'manuals', 'main');
+ // --- Firestore Listener with improved cursor handling ---
+useEffect(() => {
+  const ref = doc(db, 'manuals', 'main');
 
-    const unsub = onSnapshot(ref, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data() as { content?: string };
-        if (data.content && !isEditing) { // Don't update while typing
-          const clean = sanitizeBidi(data.content);
-          
-          // Only update if different
-          if (clean !== content) {
-            setContent(clean);
-            if (editorRef.current) {
-              // Save cursor position BEFORE updating
-              const cursorPos = saveCursorPosition(editorRef.current);
-              lastCursorPositionRef.current = cursorPos;
-              
-              // Update content
-              editorRef.current.innerHTML = clean;
-              
-              // Restore cursor position after a brief delay
-              setTimeout(() => {
-                if (cursorPos !== null && editorRef.current) {
-                  restoreCursorPosition(editorRef.current, cursorPos);
-                }
-              }, 10);
-            }
+  const unsub = onSnapshot(ref, (snap) => {
+    if (snap.exists()) {
+      const data = snap.data() as { content?: string };
+
+      if (data.content && !isEditing) { // Don't update while typing
+        const clean = sanitizeBidi(data.content);
+
+        // Only update if different
+        if (clean !== content) {
+          setContent(clean);
+
+          if (editorRef.current) {
+            // Save cursor position BEFORE updating
+            const cursorPos = saveCursorPosition(editorRef.current);
+            lastCursorPositionRef.current = cursorPos;
+
+            // Update editor content
+            editorRef.current.innerHTML = clean;
+
+            // Restore cursor position
+            setTimeout(() => {
+              if (cursorPos !== null && editorRef.current) {
+                restoreCursorPosition(editorRef.current, cursorPos);
+              }
+            }, 10);
           }
         }
-      } else {
-        setDoc(ref, { content: defaultContent }).catch(console.error);
       }
-    });
+    } else {
+      setDoc(ref, { content: defaultContent }).catch(console.error);
+    }
+  });
 
-    return () => unsub();
-  }, [isEditing, content]);
+  return () => unsub();
+}, [isEditing, content]);
+
+
+
+// --- Ensure editor always shows content when returning to admin mode ---
+useEffect(() => {
+  if (role === "admin" && !showSource && editorRef.current) {
+    editorRef.current.innerHTML = content;
+  }
+}, [role, showSource, content]);
 
   // --- Much improved input handler with typing detection ---
   const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
@@ -618,11 +630,39 @@ const App: FC = () => {
     setAuditResults(formattedResults);
     setIsAuditing(false);
   };
+  // ------------------- THEME LOGIC -------------------
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+
+useEffect(() => {
+  const saved = localStorage.getItem("theme") as "light" | "dark" | null;
+  if (saved) {
+    setTheme(saved);
+    document.documentElement.classList.remove("light", "dark");
+    document.documentElement.classList.add(saved);
+  } else {
+    // Default theme = light
+    document.documentElement.classList.add("light");
+  }
+}, []);
+
+const toggleTheme = () => {
+  const newTheme = theme === "light" ? "dark" : "light";
+  setTheme(newTheme);
+
+  localStorage.setItem("theme", newTheme);
+
+  document.documentElement.classList.remove("light", "dark");
+  document.documentElement.classList.add(newTheme);
+};
+// -----------------------------------------------------
 
   return (
-    <div className="flex flex-col h-screen bg-slate-100 font-sans relative">
+    <div className="flex flex-col h-screen font-sans relative" style={{ background: "var(--bg)", color: "var(--text)" }}>
       {/* Top Navigation Bar */}
-      <header className="bg-slate-900 border-b border-slate-700 px-6 py-3 flex justify-between items-center shadow-lg z-20 text-white">
+      <header
+  className="px-6 py-3 flex justify-between items-center shadow-lg z-20"
+  style={{ background: "var(--header)", color: "var(--header-text)", borderBottom: "1px solid var(--border)" }}
+>
         <div className="flex items-center gap-4">
           <div className="bg-indigo-500 p-2 rounded-lg">
             {role === 'admin' ? (
@@ -885,6 +925,13 @@ const App: FC = () => {
           {/* Admin Toolbar (Only for Admin) */}
           {role === 'admin' && user && (
             <div className="border-b border-slate-200 p-2 flex flex-wrap gap-1 bg-slate-50 items-center">
+              <button
+  onClick={toggleTheme}
+  className="px-3 py-1.5 mr-3 rounded-md border border-slate-300 text-xs font-semibold
+             bg-[var(--card)] text-[var(--text)] hover:bg-[var(--border)]"
+>
+  {theme === "light" ? " Dark Mode" : " Light Mode"}
+</button>
               <div className="flex gap-1 pr-2 border-r border-slate-300 mr-2">
                <ToolbarButton
   onClick={() => {
@@ -985,17 +1032,16 @@ const App: FC = () => {
                 onPaste={role === 'admin' && user ? handlePaste : undefined}
                 onFocus={handleEditorFocus}
                 onKeyDown={(e) => handleEnter(e)}
-                className={`editor-content max-w-3xl mx-auto min-h-[600px] bg-white shadow-sm border border-slate-200 p-12 outline-none text-slate-900 ${
-                  role === 'admin' && user
-                    ? 'cursor-text focus:ring-2 ring-indigo-100'
-                    : 'cursor-default'
-                }`}
-                style={{
-                  direction: 'ltr',
-                  unicodeBidi: 'bidi-override',
-                  textAlign: 'left',
-                  writingMode: 'horizontal-tb',
-                }}
+                className="editor-content shadow-sm p-12 outline-none"
+style={{
+  background: "var(--card)",
+  color: "var(--text)",
+  border: "1px solid var(--border)",
+  direction: "ltr",
+  unicodeBidi: "bidi-override",
+  textAlign: "left",
+  writingMode: "horizontal-tb",
+}}
                 dangerouslySetInnerHTML={
                   role === 'reader' ? { __html: content } : undefined
                 }

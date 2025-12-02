@@ -30,3 +30,28 @@ body {
   unicode-bidi: plaintext !important;
   text-align: left;
 }
+
+html.light {
+  --bg: #f8fafc;
+  --text: #0f172a;
+  --card: #ffffff;
+  --border: #cbd5e1;
+  --header: #0f172a;
+  --header-text: #ffffff;
+  --accent: #6366f1;
+}
+
+html.dark {
+  --bg: #0f172a;
+  --text: #f1f5f9;
+  --card: #1e293b;
+  --border: #334155;
+  --header: #1e293b;
+  --header-text: #f1f5f9;
+  --accent: #818cf8;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
