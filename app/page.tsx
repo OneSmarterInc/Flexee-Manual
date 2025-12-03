@@ -17,6 +17,11 @@ import {
   doc,
   setDoc,
   onSnapshot,
+  collection,
+  addDoc,
+  updateDoc,
+  getDoc,
+  deleteDoc,
 } from 'firebase/firestore';
 import {
   GoogleAuthProvider,
@@ -127,6 +132,10 @@ interface Message {
   role: 'assistant' | 'user';
   text: string;
 }
+interface PageMeta {
+  id: string;
+  title: string;
+}
 interface ToolbarButtonProps {
   onClick?: () => void;
   icon: any;
@@ -156,6 +165,7 @@ const ToolbarButton: FC<ToolbarButtonProps> = ({
     <Icon size={18} />
   </button>
 );
+
 const handleEnter = (e: React.KeyboardEvent<HTMLDivElement>) => {
   if (e.key !== "Enter") return;
 
@@ -198,16 +208,24 @@ const handleEnter = (e: React.KeyboardEvent<HTMLDivElement>) => {
 
 const App: FC = () => {
   const defaultContent = `
-    <h4 classname> Loading... </h4>
+    <h4> Loading... </h4>
     <p> Please wait while we load your content. </p>
   `;
 
   // --- Core State ---
   const [content, setContent] = useState(defaultContent);
+  const [pages, setPages] = useState<PageMeta[]>([]);
+const [activePageId, setActivePageId] = useState<string | null>(null);
+const [isPagesLoading, setIsPagesLoading] = useState(true);
+const hasInitializedPagesRef = useRef(false);
+const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
+const [renamingPageId, setRenamingPageId] = useState<string | null>(null);
+const [renameValue, setRenameValue] = useState('');
   const [role, setRole] = useState<'admin' | 'reader'>('reader');
   const [saveStatus, setSaveStatus] = useState<'Saved' | 'Saving...' | 'Error'>('Saved');
   const [apiKey, setApiKey] = useState('');
-
+const [lastDeletedPage, setLastDeletedPage] = useState<any | null>(null);
+const [undoVisible, setUndoVisible] = useState(false);
   // Auth state
   const [user, setUser] = useState<User | null>(null);
   const [email, setEmail] = useState('');
@@ -220,43 +238,44 @@ const App: FC = () => {
   const [showChat, setShowChat] = useState<boolean>(false);
   const [showAuditor, setShowAuditor] = useState<boolean>(false);
   const editorRef = useRef<HTMLDivElement | null>(null);
+
   const applyBlockTag = (tag: "H1" | "H2" | "P") => {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) return;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
 
-  const range = selection.getRangeAt(0);
+    const range = selection.getRangeAt(0);
 
-  // Ensure we start from an element, not a text node
-  let node =
-    range.startContainer.nodeType === 3
-      ? range.startContainer.parentElement!
-      : (range.startContainer as HTMLElement);
+    // Ensure we start from an element, not a text node
+    let node =
+      range.startContainer.nodeType === 3
+        ? range.startContainer.parentElement!
+        : (range.startContainer as HTMLElement);
 
-  // Find the nearest block element (p, div, h1, h2)
-  while (
-    node &&
-    node !== editorRef.current &&
-    !["P", "DIV", "H1", "H2"].includes(node.nodeName)
-  ) {
-    node = node.parentElement as HTMLElement;
-  }
+    // Find the nearest block element (p, div, h1, h2)
+    while (
+      node &&
+      node !== editorRef.current &&
+      !["P", "DIV", "H1", "H2"].includes(node.nodeName)
+    ) {
+      node = node.parentElement as HTMLElement;
+    }
 
-  if (!node || node === editorRef.current) return;
+    if (!node || node === editorRef.current) return;
 
-  // Create the new block item
-  const newBlock = document.createElement(tag);
-  newBlock.innerHTML = node.innerHTML;
+    // Create the new block item
+    const newBlock = document.createElement(tag);
+    newBlock.innerHTML = node.innerHTML;
 
-  // Replace the old block with new block
-  node.replaceWith(newBlock);
+    // Replace the old block with new block
+    node.replaceWith(newBlock);
 
-  // Move cursor inside new block
-  const newRange = document.createRange();
-  newRange.selectNodeContents(newBlock);
-  newRange.collapse(false);
-  selection.removeAllRanges();
-  selection.addRange(newRange);
-};
+    // Move cursor inside new block
+    const newRange = document.createRange();
+    newRange.selectNodeContents(newBlock);
+    newRange.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(newRange);
+  };
 
   const sourceRef = useRef<HTMLTextAreaElement | null>(null);
   // AI State
@@ -314,7 +333,16 @@ const App: FC = () => {
     const savedKey = localStorage.getItem('flexee_api_key');
     if (savedKey) setApiKey(savedKey);
   }, []);
+  useEffect(() => {
+  const handleClick = () => {
+    if (undoVisible) setUndoVisible(false);
+  };
 
+  // Clicking anywhere hides undo
+  document.addEventListener("click", handleClick);
+
+  return () => document.removeEventListener("click", handleClick);
+}, [undoVisible]);
   // Keep toolbar buttons active based on selection
   useEffect(() => {
     document.addEventListener("selectionchange", updateFormatState);
@@ -322,6 +350,56 @@ const App: FC = () => {
   }, []);
 
   // --- Auth Listener ---
+  // --- Load list of pages & create default if none ---
+useEffect(() => {
+  const pagesCol = collection(db, 'manualPages');
+
+  const unsub = onSnapshot(pagesCol, async (snap) => {
+    setIsPagesLoading(false);
+
+    // First-time initialization: migrate old single "main" doc
+    if (snap.empty && !hasInitializedPagesRef.current) {
+      hasInitializedPagesRef.current = true;
+      try {
+        const mainRef = doc(db, 'manuals', 'main');
+        const mainSnap = await getDoc(mainRef);
+        const initialContent =
+          (mainSnap.exists() && (mainSnap.data() as any).content) ||
+          defaultContent;
+
+        const newDocRef = await addDoc(pagesCol, {
+          title: 'Page 1',
+          content: initialContent,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        setActivePageId(newDocRef.id);
+      } catch (e) {
+        console.error('Error initializing first page', e);
+      }
+      return;
+    }
+
+    // Normal: map pages into state
+    const list: PageMeta[] = [];
+    snap.forEach((d) => {
+      const data = d.data() as any;
+      list.push({
+        id: d.id,
+        title: data.title || 'Untitled page',
+      });
+    });
+    setPages(list);
+
+    // If no active page yet, pick the first one
+    if (!activePageId && list.length > 0) {
+      setActivePageId(list[0].id);
+    }
+  });
+
+  return () => unsub();
+}, [activePageId, defaultContent]);
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
@@ -336,48 +414,52 @@ const App: FC = () => {
   }, []);
 
   // --- Create debounced update function ---
-  const debouncedUpdate = useMemo(() => 
-    debounce(async (newContent: string) => {
+  const debouncedUpdate = useMemo(
+  () =>
+    debounce(async (newContent: string, pageId: string | null) => {
+      if (!pageId) return; // no active page yet
+
       const clean = sanitizeBidi(newContent);
       setContent(clean);
       setSaveStatus('Saving...');
 
       try {
-        const ref = doc(db, 'manuals', 'main');
-        await setDoc(ref, { content: clean, updatedAt: Date.now() });
+        const ref = doc(db, 'manualPages', pageId);
+        await setDoc(
+          ref,
+          { content: clean, updatedAt: Date.now() },
+          { merge: true }
+        );
         setSaveStatus('Saved');
       } catch (error) {
         console.error(error);
         setSaveStatus('Error');
       }
-    }, 1000), // 1 second delay
-    []
-  );
-
- // --- Firestore Listener with improved cursor handling ---
+    }, 1000),
+  []
+);
+// --- Firestore Listener with improved cursor handling & per-page content ---
 useEffect(() => {
-  const ref = doc(db, 'manuals', 'main');
+  if (!activePageId) return;
+
+  const ref = doc(db, 'manualPages', activePageId);
 
   const unsub = onSnapshot(ref, (snap) => {
     if (snap.exists()) {
       const data = snap.data() as { content?: string };
 
-      if (data.content && !isEditing) { // Don't update while typing
+      if (data.content && !isEditing) {
         const clean = sanitizeBidi(data.content);
 
-        // Only update if different
         if (clean !== content) {
           setContent(clean);
 
           if (editorRef.current) {
-            // Save cursor position BEFORE updating
             const cursorPos = saveCursorPosition(editorRef.current);
             lastCursorPositionRef.current = cursorPos;
 
-            // Update editor content
             editorRef.current.innerHTML = clean;
 
-            // Restore cursor position
             setTimeout(() => {
               if (cursorPos !== null && editorRef.current) {
                 restoreCursorPosition(editorRef.current, cursorPos);
@@ -386,22 +468,18 @@ useEffect(() => {
           }
         }
       }
-    } else {
-      setDoc(ref, { content: defaultContent }).catch(console.error);
     }
   });
 
   return () => unsub();
-}, [isEditing, content]);
+}, [activePageId, isEditing, content]);
 
-
-
-// --- Ensure editor always shows content when returning to admin mode ---
-useEffect(() => {
-  if (role === "admin" && !showSource && editorRef.current) {
-    editorRef.current.innerHTML = content;
-  }
-}, [role, showSource, content]);
+  // --- Ensure editor always shows content when returning to admin mode ---
+  useEffect(() => {
+    if (role === "admin" && !showSource && editorRef.current) {
+      editorRef.current.innerHTML = content;
+    }
+  }, [role, showSource, content]);
 
   // --- Much improved input handler with typing detection ---
   const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
@@ -448,7 +526,7 @@ useEffect(() => {
     lastCursorPositionRef.current = cursorPos;
     
     // Debounce the update to Firestore
-    debouncedUpdate(html);
+    debouncedUpdate(html, activePageId);
   };
 
   // --- Handle paste events to prevent bidi injection ---
@@ -495,6 +573,85 @@ useEffect(() => {
       }
     }
   };
+  // --- Document tab actions ---
+
+const handleAddPage = async () => {
+  try {
+    const pagesCol = collection(db, 'manualPages');
+    const newIndex = pages.length + 1;
+
+    const newRef = await addDoc(pagesCol, {
+      title: `Page ${newIndex}`,
+      content: defaultContent,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    setActivePageId(newRef.id);
+
+    if (editorRef.current) {
+      editorRef.current.innerHTML = defaultContent;
+    }
+  } catch (e) {
+    console.error('Error adding page', e);
+  }
+};
+
+const startRenamePage = (page: PageMeta) => {
+  setRenamingPageId(page.id);
+  setRenameValue(page.title);
+};
+
+const commitRenamePage = async () => {
+  if (!renamingPageId) return;
+  const newName = renameValue.trim() || 'Untitled page';
+
+  try {
+    const ref = doc(db, 'manualPages', renamingPageId);
+    await updateDoc(ref, { title: newName });
+  } catch (e) {
+    console.error('Error renaming page', e);
+  } finally {
+    setRenamingPageId(null);
+  }
+};
+const handleDeletePage = async (pageId: string) => {
+  if (pages.length === 1) {
+    alert("You cannot delete the only remaining page.");
+    return;
+  }
+
+  const confirmDelete = confirm("Are you sure you want to delete this page?");
+  if (!confirmDelete) return;
+
+  try {
+    // Before deletion → save page data for undo
+    const pageToDelete = pages.find((p) => p.id === pageId);
+
+    if (pageToDelete) {
+      const snap = await getDoc(doc(db, "manualPages", pageId));
+      if (snap.exists()) {
+        setLastDeletedPage({
+  id: pageId,
+  title: pageToDelete.title,
+  content: (snap.data() as any).content || "",
+});
+setUndoVisible(true); 
+      }
+    }
+
+    // Delete from database
+    await deleteDoc(doc(db, "manualPages", pageId));
+
+    // Switch to first available page
+    const remaining = pages.filter((p) => p.id !== pageId);
+    if (remaining.length > 0) {
+      setActivePageId(remaining[0].id);
+    }
+  } catch (e) {
+    console.error("Error deleting page:", e);
+  }
+};
 
   // --- Auth Actions ---
   const handleLogin = async () => {
@@ -630,39 +787,143 @@ useEffect(() => {
     setAuditResults(formattedResults);
     setIsAuditing(false);
   };
+
   // ------------------- THEME LOGIC -------------------
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
 
-useEffect(() => {
-  const saved = localStorage.getItem("theme") as "light" | "dark" | null;
-  if (saved) {
-    setTheme(saved);
+  useEffect(() => {
+    const saved = localStorage.getItem("theme") as "light" | "dark" | null;
+    if (saved) {
+      setTheme(saved);
+      document.documentElement.classList.remove("light", "dark");
+      document.documentElement.classList.add(saved);
+    } else {
+      // Default theme = light
+      document.documentElement.classList.add("light");
+    }
+  }, []);
+
+  const toggleTheme = () => {
+    const newTheme = theme === "light" ? "dark" : "light";
+    setTheme(newTheme);
+
+    localStorage.setItem("theme", newTheme);
+
     document.documentElement.classList.remove("light", "dark");
-    document.documentElement.classList.add(saved);
-  } else {
-    // Default theme = light
-    document.documentElement.classList.add("light");
-  }
-}, []);
+    document.documentElement.classList.add(newTheme);
+  };
+  // -----------------------------------------------------
 
-const toggleTheme = () => {
-  const newTheme = theme === "light" ? "dark" : "light";
-  setTheme(newTheme);
+  // ------------- ADMIN EXTRA ACTIONS (SAVE / SPLIT) -------------
 
-  localStorage.setItem("theme", newTheme);
+  const handleSaveAsHTML = () => {
+    const htmlToSave = editorRef.current ? editorRef.current.innerHTML : content;
+    const blob = new Blob([htmlToSave], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "flexee-manual.html";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
-  document.documentElement.classList.remove("light", "dark");
-  document.documentElement.classList.add(newTheme);
-};
-// -----------------------------------------------------
+  type Chapter = { title: string; html: string };
+
+  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [showChapterPanel, setShowChapterPanel] = useState(false);
+  const [selectedChapterIndex, setSelectedChapterIndex] = useState(0);
+
+  const handleSplitChapters = () => {
+    const htmlSource = editorRef.current ? editorRef.current.innerHTML : content;
+
+    if (!htmlSource || !htmlSource.trim()) {
+      alert("No content found to split.");
+      return;
+    }
+
+    const parser = new DOMParser();
+    const docHtml = parser.parseFromString(htmlSource, "text/html");
+    const bodyChildren = Array.from(docHtml.body.childNodes);
+
+    const newChapters: Chapter[] = [];
+    let current: { title: string; nodes: ChildNode[] } | null = null;
+
+    bodyChildren.forEach((node) => {
+      if (
+        node.nodeType === Node.ELEMENT_NODE &&
+        (node as HTMLElement).tagName === "H1"
+      ) {
+        // Flush previous chapter
+        if (current && current.nodes.length > 0) {
+          const wrapper = docHtml.createElement("div");
+          current.nodes.forEach((n) => wrapper.appendChild(n.cloneNode(true)));
+          newChapters.push({
+            title: current.title,
+            html: wrapper.innerHTML,
+          });
+        }
+
+        const headingEl = node as HTMLElement;
+        current = {
+          title: headingEl.textContent?.trim() || "Untitled Chapter",
+          nodes: [node],
+        };
+      } else {
+        if (current) {
+          current.nodes.push(node);
+        }
+      }
+    });
+
+    // Flush last chapter
+    if (current && current.nodes.length > 0) {
+      const wrapper = docHtml.createElement("div");
+      current.nodes.forEach((n) => wrapper.appendChild(n.cloneNode(true)));
+      newChapters.push({
+        title: current.title,
+        html: wrapper.innerHTML,
+      });
+    }
+
+    if (newChapters.length === 0) {
+      alert('No <h1> headings found. Please ensure each chapter starts with an H1 heading.');
+      return;
+    }
+
+    setChapters(newChapters);
+    setSelectedChapterIndex(0);
+    setShowChapterPanel(true);
+  };
+
+  const handleDownloadCurrentChapter = () => {
+    if (!showChapterPanel || chapters.length === 0) return;
+    const chapter = chapters[selectedChapterIndex];
+    const safeTitle = (chapter.title || "chapter")
+      .replace(/[^a-z0-9]+/gi, "_")
+      .toLowerCase();
+
+    const blob = new Blob([chapter.html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeTitle || "chapter"}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // ---------------------------------------------------------------
 
   return (
     <div className="flex flex-col h-screen font-sans relative" style={{ background: "var(--bg)", color: "var(--text)" }}>
       {/* Top Navigation Bar */}
       <header
-  className="px-6 py-3 flex justify-between items-center shadow-lg z-20"
-  style={{ background: "var(--header)", color: "var(--header-text)", borderBottom: "1px solid var(--border)" }}
->
+        className="px-6 py-3 flex justify-between items-center shadow-lg z-20"
+        style={{ background: "var(--header)", color: "var(--header-text)", borderBottom: "1px solid var(--border)" }}
+      >
         <div className="flex items-center gap-4">
           <div className="bg-indigo-500 p-2 rounded-lg">
             {role === 'admin' ? (
@@ -926,48 +1187,45 @@ const toggleTheme = () => {
           {role === 'admin' && user && (
             <div className="border-b border-slate-200 p-2 flex flex-wrap gap-1 bg-slate-50 items-center">
               <button
-  onClick={toggleTheme}
-  className="px-3 py-1.5 mr-3 rounded-md border border-slate-300 text-xs font-semibold
-             bg-[var(--card)] text-[var(--text)] hover:bg-[var(--border)]"
->
-  {theme === "light" ? " Dark Mode" : " Light Mode"}
-</button>
+                onClick={toggleTheme}
+                className="px-3 py-1.5 mr-3 rounded-md border border-slate-300 text-xs font-semibold
+                           bg-[var(--card)] text-[var(--text)] hover:bg-[var(--border)]"
+              >
+                {theme === "light" ? " Dark Mode" : " Light Mode"}
+              </button>
               <div className="flex gap-1 pr-2 border-r border-slate-300 mr-2">
-               <ToolbarButton
-  onClick={() => {
-    if (editorRef.current) editorRef.current.focus();
-    document.execCommand("formatBlock", false, "H1");
-    updateFormatState();
-  }}
-  active={formatState.h1}
-  icon={Heading1}
-  title="H1"
-/>
+                <ToolbarButton
+                  onClick={() => {
+                    if (editorRef.current) editorRef.current.focus();
+                    document.execCommand("formatBlock", false, "H1");
+                    updateFormatState();
+                  }}
+                  active={formatState.h1}
+                  icon={Heading1}
+                  title="H1"
+                />
 
-<ToolbarButton
-  onClick={() => {
-    if (editorRef.current) editorRef.current.focus();
-    document.execCommand("formatBlock", false, "H2");
-    updateFormatState();
-  }}
-  active={formatState.h2}
-  icon={Heading2}
-  title="H2"
-/>
+                <ToolbarButton
+                  onClick={() => {
+                    if (editorRef.current) editorRef.current.focus();
+                    document.execCommand("formatBlock", false, "H2");
+                    updateFormatState();
+                  }}
+                  active={formatState.h2}
+                  icon={Heading2}
+                  title="H2"
+                />
 
-<ToolbarButton
-  onClick={() => {
-    if (editorRef.current) editorRef.current.focus();
-    document.execCommand("formatBlock", false, "P");
-    updateFormatState();
-  }}
-  active={formatState.p}
-  icon={Type}
-  title="Paragraph"
-/>
-
-
-
+                <ToolbarButton
+                  onClick={() => {
+                    if (editorRef.current) editorRef.current.focus();
+                    document.execCommand("formatBlock", false, "P");
+                    updateFormatState();
+                  }}
+                  active={formatState.p}
+                  icon={Type}
+                  title="Paragraph"
+                />
               </div>
               <div className="flex gap-1 pr-2 border-r border-slate-300 mr-2">
                 <ToolbarButton
@@ -1016,47 +1274,248 @@ const toggleTheme = () => {
 
           {/* The Content */}
           <div className="flex-1 overflow-y-auto p-8 lg:p-12 relative bg-slate-50/50">
-            {role === 'admin' && user && showSource ? (
-              <textarea
-                ref={sourceRef}
-                className="w-full h-full bg-slate-900 text-green-400 font-mono p-6 rounded text-sm focus:outline-none"
-                value={content}
-                onChange={(e) => debouncedUpdate(e.target.value)}
-              />
-            ) : (
-              <div
-                dir="ltr"
-                ref={editorRef}
-                contentEditable={role === 'admin' && !!user}
-                onInput={role === 'admin' && user ? handleInput : undefined}
-                onPaste={role === 'admin' && user ? handlePaste : undefined}
-                onFocus={handleEditorFocus}
-                onKeyDown={(e) => handleEnter(e)}
-                className="editor-content shadow-sm p-12 outline-none"
-style={{
-  background: "var(--card)",
-  color: "var(--text)",
-  border: "1px solid var(--border)",
-  direction: "ltr",
-  unicodeBidi: "bidi-override",
-  textAlign: "left",
-  writingMode: "horizontal-tb",
-}}
-                dangerouslySetInnerHTML={
-                  role === 'reader' ? { __html: content } : undefined
-                }
-              />
-            )}
+            {/* Admin-only actions above editor */}
             {role === 'admin' && user && !showSource && (
-              <style>
-                {`[contenteditable]:empty:before { content: "Start writing..."; color: #94a3b8; }`}
-              </style>
+              <>
+                <div className="max-w-3xl mx-auto mb-3 flex flex-wrap gap-2 justify-end">
+                  <button
+                    onClick={handleSaveAsHTML}
+                    className="px-3 py-1.5 rounded-md bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700"
+                  >
+                    Save as HTML
+                  </button>
+                  <button
+                    onClick={handleSplitChapters}
+                    className="px-3 py-1.5 rounded-md bg-slate-800 text-white text-xs font-semibold hover:bg-slate-900"
+                  >
+                    Split Document by Chapters (H1)
+                  </button>
+                </div>
+
+                {showChapterPanel && chapters.length > 0 && (
+                  <div className="max-w-5xl mx-auto mb-6 flex gap-4">
+                    {/* Sidebar with chapter titles */}
+                    <div className="w-64 bg-slate-900 text-slate-100 rounded-lg border border-slate-700 p-3 flex flex-col">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                          Chapters (H1)
+                        </span>
+                        <button
+                          onClick={() => setShowChapterPanel(false)}
+                          className="text-[10px] text-slate-400 hover:text-slate-100"
+                        >
+                          Close
+                        </button>
+                      </div>
+                      <div className="space-y-1 max-h-64 overflow-y-auto">
+                        {chapters.map((ch, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => setSelectedChapterIndex(idx)}
+                            className={`w-full text-left text-xs px-2 py-1.5 rounded-md transition-colors ${
+                              idx === selectedChapterIndex
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                            }`}
+                          >
+                            {ch.title || `Chapter ${idx + 1}`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Chapter preview + per-chapter download */}
+                    <div className="flex-1 bg-[var(--card)] border border-[var(--border)] rounded-lg p-4 max-h-64 overflow-y-auto">
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-sm font-semibold">
+                          {chapters[selectedChapterIndex]?.title || 'Selected Chapter'}
+                        </h3>
+                        <button
+                          onClick={handleDownloadCurrentChapter}
+                          className="px-2 py-1 text-[11px] rounded-md bg-indigo-600 text-white hover:bg-indigo-700 flex items-center gap-1"
+                        >
+                          <Save size={12} /> Download this chapter
+                        </button>
+                      </div>
+                      <div
+                        className="text-sm editor-content"
+                        dangerouslySetInnerHTML={{
+                          __html: chapters[selectedChapterIndex]?.html || '',
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </>
             )}
+            <div className="flex max-w-5xl mx-auto gap-4">
+
+  {/* LEFT PANEL — DOCUMENT TABS (ADMIN ONLY) */}
+  {role === 'admin' && user && (
+    <div className="w-56 bg-slate-900 text-slate-50 rounded-lg border border-slate-700 flex-shrink-0 flex flex-col">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700">
+        <span className="text-[11px] font-semibold tracking-wide uppercase text-slate-300">
+          Document Tabs
+        </span>
+        <button
+          type="button"
+          onClick={handleAddPage}
+          className="h-6 w-6 inline-flex items-center justify-center rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100 text-lg leading-none"
+        >
+          +
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto py-1">
+        {isPagesLoading && (
+          <div className="px-3 py-2 text-[11px] text-slate-400">
+            Loading pages...
+          </div>
+        )}
+
+        {!isPagesLoading && pages.length === 0 && (
+          <div className="px-3 py-2 text-[11px] text-slate-400">
+            No pages yet. Click + to add one.
+          </div>
+        )}
+        {lastDeletedPage && undoVisible && (
+  <div className="p-2 border-t border-slate-700">
+    <button
+      onClick={async () => {
+        try {
+          const restoredRef = await addDoc(collection(db, "manualPages"), {
+            title: lastDeletedPage.title,
+            content: lastDeletedPage.content,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+
+          setActivePageId(restoredRef.id); // Return to restored page
+          setLastDeletedPage(null); // Clear undo buffer
+        } catch (error) {
+          console.error("Error restoring page:", error);
+        }
+      }}
+      className="text-xs bg-[#34c759] text-black px-3 py-1.5 rounded hover:bg-[#2fb34f] w-full font-semibold"
+    >
+      Undo Delete
+    </button>
+  </div>
+)}
+        {pages.map((page) => {
+          const isActive = page.id === activePageId;
+          const isRenaming = page.id === renamingPageId;
+
+          return (
+            <button
+  key={page.id}
+  type="button"
+  onClick={() => {
+    setActivePageId(page.id);
+    setShowDeleteFor(page.id);   // <-- show delete only for clicked page
+  }}
+  onDoubleClick={() => startRenamePage(page)}
+  className={`w-full flex items-center justify-between px-3 py-1.5 text-left text-xs ${
+    page.id === activePageId
+      ? "bg-slate-100 text-slate-900"
+      : "bg-transparent text-slate-200 hover:bg-slate-800"
+  }`}
+>
+  {/* LEFT — Page Title OR rename box */}
+  {renamingPageId === page.id ? (
+    <input
+      autoFocus
+      value={renameValue}
+      onChange={(e) => setRenameValue(e.target.value)}
+      onBlur={commitRenamePage}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commitRenamePage();
+        } else if (e.key === "Escape") {
+          setRenamingPageId(null);
+        }
+      }}
+      className="w-full bg-slate-800 text-xs text-slate-50 rounded px-1 py-0.5 outline-none border border-slate-600"
+    />
+  ) : (
+    <span className="truncate">{page.title}</span>
+  )}
+
+  {/* RIGHT — DELETE BUTTON (only for selected page) */}
+  {showDeleteFor === page.id && (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();  
+        handleDeletePage(page.id);
+        setShowDeleteFor(null);
+      }}
+      className="text-red-500 hover:text-red-700 text-[10px] ml-3 font-bold uppercase"
+    >
+      Delete
+    </button>
+  )}
+</button>
+          );
+        })}
+      </div>
+    </div>
+  )}
+
+  {/* RIGHT SIDE — EDITOR */}
+  <div className="flex-1">
+
+    {role === 'admin' && user && showSource ? (
+      <textarea
+        ref={sourceRef}
+        className="w-full h-full bg-slate-900 text-green-400 font-mono p-6 rounded text-sm focus:outline-none"
+        value={content}
+        onChange={(e) => debouncedUpdate(e.target.value, activePageId)}
+      />
+    ) : (
+      <>
+        <div
+          dir="ltr"
+          ref={editorRef}
+          contentEditable={role === 'admin' && !!user}
+          onInput={role === 'admin' && user ? handleInput : undefined}
+          onPaste={role === 'admin' && user ? handlePaste : undefined}
+          onFocus={handleEditorFocus}
+          onKeyDown={(e) => handleEnter(e)}
+          className="editor-content shadow-sm p-12 outline-none max-w-3xl mx-auto min-h-[600px]"
+          style={{
+            background: "var(--card)",
+            color: "var(--text)",
+            border: "1px solid var(--border)",
+            direction: "ltr",
+            unicodeBidi: "bidi-override",
+            textAlign: "left",
+            writingMode: "horizontal-tb",
+          }}
+          dangerouslySetInnerHTML={
+            role === 'reader' ? { __html: content } : undefined
+          }
+        />
+
+        {role === 'admin' && user && !showSource && (
+          <style>
+            {`[contenteditable]:empty:before {
+              content: "Start writing...";
+              color: #94a3b8;
+            }`}
+          </style>
+        )}
+      </>
+    )}
+
+  </div>
+</div>
           </div>
         </div>
 
-              <style>
-{`
+        <style>
+          {`
   .editor-content h1 {
     font-size: 2.2rem !important;
     font-weight: 700 !important;
@@ -1076,7 +1535,7 @@ style={{
     margin-bottom: 0.6rem !important;
   }
 `}
-</style>
+        </style>
 
         {/* === USER: CHAT BOT (Reader Only) === */}
         {role === 'reader' && (
