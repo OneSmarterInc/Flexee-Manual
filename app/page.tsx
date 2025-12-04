@@ -830,72 +830,78 @@ setUndoVisible(true);
   };
 
   type Chapter = { title: string; html: string };
+  type WorkingChapter = {
+  title: string;
+  nodes: ChildNode[];
+};
+
 
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [showChapterPanel, setShowChapterPanel] = useState(false);
   const [selectedChapterIndex, setSelectedChapterIndex] = useState(0);
 
   const handleSplitChapters = () => {
-    const htmlSource = editorRef.current ? editorRef.current.innerHTML : content;
+  const htmlSource = editorRef.current ? editorRef.current.innerHTML : content;
 
-    if (!htmlSource || !htmlSource.trim()) {
-      alert("No content found to split.");
-      return;
-    }
+  if (!htmlSource || !htmlSource.trim()) {
+    alert("No content found to split.");
+    return;
+  }
 
-    const parser = new DOMParser();
-    const docHtml = parser.parseFromString(htmlSource, "text/html");
-    const bodyChildren = Array.from(docHtml.body.childNodes);
+  const parser = new DOMParser();
+  const docHtml = parser.parseFromString(htmlSource, "text/html");
+  const bodyChildren: ChildNode[] = Array.from(docHtml.body.childNodes);
 
-    const newChapters: Chapter[] = [];
-    let current: { title: string; nodes: ChildNode[] } | null = null;
+  const newChapters: Chapter[] = [];
+  let current: WorkingChapter | null = null;
 
-    bodyChildren.forEach((node) => {
-      if (
-        node.nodeType === Node.ELEMENT_NODE &&
-        (node as HTMLElement).tagName === "H1"
-      ) {
-        // Flush previous chapter
-        if (current && current.nodes.length > 0) {
-          const wrapper = docHtml.createElement("div");
-          current.nodes.forEach((n) => wrapper.appendChild(n.cloneNode(true)));
-          newChapters.push({
-            title: current.title,
-            html: wrapper.innerHTML,
-          });
-        }
-
-        const headingEl = node as HTMLElement;
-        current = {
-          title: headingEl.textContent?.trim() || "Untitled Chapter",
-          nodes: [node],
-        };
-      } else {
-        if (current) {
-          current.nodes.push(node);
-        }
+  bodyChildren.forEach((node: ChildNode) => {
+    if (
+      node.nodeType === Node.ELEMENT_NODE &&
+      (node as HTMLElement).tagName === "H1"
+    ) {
+      // Flush previous chapter
+      if (current && current.nodes.length > 0) {
+        const wrapper = docHtml.createElement("div");
+        current.nodes.forEach((n) => wrapper.appendChild(n.cloneNode(true)));
+        newChapters.push({
+          title: current.title,
+          html: wrapper.innerHTML,
+        });
       }
+
+      const headingEl = node as HTMLElement;
+      current = {
+        title: headingEl.textContent?.trim() || "Untitled Chapter",
+        nodes: [node],
+      };
+    } else if (current) {
+      current.nodes.push(node);
+    }
+  });
+
+  // Flush last chapter
+  if (current && current.nodes.length > 0) {
+    const wrapper = docHtml.createElement("div");
+    current.nodes.forEach((n) => wrapper.appendChild(n.cloneNode(true)));
+    newChapters.push({
+      title: current.title,
+      html: wrapper.innerHTML,
     });
+  }
 
-    // Flush last chapter
-    if (current && current.nodes.length > 0) {
-      const wrapper = docHtml.createElement("div");
-      current.nodes.forEach((n) => wrapper.appendChild(n.cloneNode(true)));
-      newChapters.push({
-        title: current.title,
-        html: wrapper.innerHTML,
-      });
-    }
+  if (newChapters.length === 0) {
+    alert(
+      "No <h1> headings found. Please ensure each chapter starts with an H1 heading."
+    );
+    return;
+  }
 
-    if (newChapters.length === 0) {
-      alert('No <h1> headings found. Please ensure each chapter starts with an H1 heading.');
-      return;
-    }
+  setChapters(newChapters);
+  setSelectedChapterIndex(0);
+  setShowChapterPanel(true);
+};
 
-    setChapters(newChapters);
-    setSelectedChapterIndex(0);
-    setShowChapterPanel(true);
-  };
 
   const handleDownloadCurrentChapter = () => {
     if (!showChapterPanel || chapters.length === 0) return;
