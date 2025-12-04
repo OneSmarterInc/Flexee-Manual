@@ -853,7 +853,7 @@ setUndoVisible(true);
   const bodyChildren: ChildNode[] = Array.from(docHtml.body.childNodes);
 
   const newChapters: Chapter[] = [];
-  let current: WorkingChapter | null = null;
+ let current: any = null;
 
   bodyChildren.forEach((node: ChildNode) => {
     if (
