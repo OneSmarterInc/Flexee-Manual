@@ -863,7 +863,7 @@ setUndoVisible(true);
       // Flush previous chapter
       if (current && current.nodes.length > 0) {
         const wrapper = docHtml.createElement("div");
-        current.nodes.forEach((n) => wrapper.appendChild(n.cloneNode(true)));
+        current.nodes.forEach((n: ChildNode) => wrapper.appendChild(n.cloneNode(true)));
         newChapters.push({
           title: current.title,
           html: wrapper.innerHTML,
@@ -883,7 +883,7 @@ setUndoVisible(true);
   // Flush last chapter
   if (current && current.nodes.length > 0) {
     const wrapper = docHtml.createElement("div");
-    current.nodes.forEach((n) => wrapper.appendChild(n.cloneNode(true)));
+    current.nodes.forEach((n: ChildNode) => wrapper.appendChild(n.cloneNode(true)));
     newChapters.push({
       title: current.title,
       html: wrapper.innerHTML,
