@@ -330,7 +330,7 @@ const [undoVisible, setUndoVisible] = useState(false);
 
   // --- Initialization ---
   useEffect(() => {
-    const savedKey = localStorage.getItem('flexee_api_key');
+    const savedKey = "AIzaSyDDkxZ0WaYq2w9wY4ONWAsjdEMVqhsr8jc";
     if (savedKey) setApiKey(savedKey);
   }, []);
   useEffect(() => {
@@ -700,38 +700,51 @@ setUndoVisible(true);
     setRole('reader');
   };
 
-  // --- AI Logic ---
   const callGemini = async (systemPrompt: string, userPrompt: string): Promise<string | null> => {
-    if (!apiKey) {
-      alert('Please enter a Google Gemini API Key in the Settings.');
-      return null;
+  if (!apiKey) {
+    alert('Please enter a Google Gemini API Key in the Settings.');
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: `${systemPrompt}\n\nUser Input: ${userPrompt}` }
+              ]
+            }
+          ]
+        })
+      }
+    );
+
+    const data = await response.json();
+    
+    if (data.error) {
+      console.error('Gemini API Error:', data.error);
+      
+      // Handle rate limit errors more gracefully
+      if (data.error.code === 429) {
+        return "⚠️ Rate limit reached. Please wait a minute before trying again. Free tier allows 15 requests per minute.";
+      }
+      
+      return `Error: ${data.error.message}`;
     }
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  {
-                    text: `${systemPrompt}\n\nUser Input: ${userPrompt}`,
-                  },
-                ],
-              },
-            ],
-          }),
-        }
-      );
-      const data = await response.json();
-      return data.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
-    } catch (error) {
-      console.error(error);
-      return 'Error connecting to AI.';
-    }
-  };
+    
+    return data.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
+
+  } catch (error) {
+    console.error(error);
+    return "Error connecting to AI.";
+  }
+};``
+
 
   const handleUserChat = async () => {
     if (!chatInput.trim()) return;
