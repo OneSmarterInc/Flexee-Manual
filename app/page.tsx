@@ -897,11 +897,34 @@ if (auditType === "grammar") {
 const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require("docx");
 const saveAs = require("file-saver").saveAs;
 
+const removeDocxHighlights = (text: string) => {
+  return text
+    .replace(/<mark[^>]*>(.*?)<\/mark>/g, "$1")
+    .replace(/<span[^>]*background[^>]*>(.*?)<\/span>/g, "$1")
+    .replace(/<span[^>]*>(.*?)<\/span>/g, "$1")
+    .replace(/&nbsp;/g, " ")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+};
+
+
 const handleDownloadAuditReport = async () => {
   if (!auditResults || auditResults.length === 0) {
     alert("No audit results available to download.");
     return;
   }
+
+  // Helper to strip HTML spans/marks before adding to DOCX
+  const cleanText = (text: string) => {
+    if (!text) return "";
+    return text
+      .replace(/<mark[^>]*>(.*?)<\/mark>/g, "$1")
+      .replace(/<span[^>]*background[^>]*>(.*?)<\/span>/g, "$1")
+      .replace(/<span[^>]*>(.*?)<\/span>/g, "$1")
+      .replace(/&nbsp;/g, " ")
+      .replace(/<[^>]+>/g, "")
+      .trim();
+  };
 
   let children = [];
 
@@ -948,36 +971,33 @@ const handleDownloadAuditReport = async () => {
   );
 
   // -------------------------------------------------------------------
-  //               CONSISTENCY MODE (Highlight keywords only)
+  // 🔵 CONSISTENCY MODE — Clean text, bold keywords, NO HIGHLIGHTS
   // -------------------------------------------------------------------
-
   if (auditType === "consistency") {
     auditResults.forEach((line) => {
-      const keywords = line.match(/\b[A-Z0-9]+\b/g) || []; // detect IMPORTANT words
+      const cleanLine = cleanText(line);
+      const keywords = cleanLine.match(/\b[A-Z0-9]+\b/g) || [];
 
       let parts = [];
-      let remaining = line;
+      let remaining = cleanLine;
 
       keywords.forEach((key) => {
         const idx = remaining.indexOf(key);
         if (idx !== -1) {
-          // normal text before keyword
-          parts.push(new TextRun(remaining.substring(0, idx)));
-
-          // highlighted keyword only
+          parts.push(new TextRun(remaining.substring(0, idx))); // before keyword
           parts.push(
             new TextRun({
               text: key,
-              highlight: "yellow",
               bold: true,
+              color: "000000",
+              highlight: undefined,
             })
           );
-
           remaining = remaining.substring(idx + key.length);
         }
       });
 
-      parts.push(new TextRun(remaining));
+      parts.push(new TextRun(remaining)); // add rest
 
       children.push(
         new Paragraph({
@@ -987,6 +1007,7 @@ const handleDownloadAuditReport = async () => {
       );
     });
   }
+
 
   // -------------------------------------------------------------------
   //               GRAMMAR MODE (Original = Red, Corrected = Green)
@@ -1038,24 +1059,23 @@ if (auditType === "grammar" && corrections.length > 0) {
   // -------------------------------------------------------------------
   //               DEFAULT MODE (Technical / Code Review)
   // -------------------------------------------------------------------
+if (auditType === "code") {
+  auditResults.forEach((line) => {
+    children.push(
+      new Paragraph({
+        children: [
+          new TextRun({ text: "• ", bold: true }),
+          new TextRun({
+            text: line,      // simple black text
+            color: "000000", // ensure black
+          }),
+        ],
+        spacing: { after: 150 },
+      })
+    );
+  });
+}
 
-  if (auditType === "code") {
-    auditResults.forEach((line) => {
-      children.push(
-        new Paragraph({
-          children: [
-            new TextRun({ text: "• ", bold: true }),
-            new TextRun({
-              text: line,
-              color: "FF0000",
-              highlight: "yellow",
-            }),
-          ],
-          spacing: { after: 150 },
-        })
-      );
-    });
-  }
 
   // -------------------------------------------------------------------
   //               MAKE DOCUMENT + DOWNLOAD
@@ -1338,9 +1358,48 @@ useEffect(() => {
   return () => document.removeEventListener("click", handleClickOutside);
 }, []);
 
+  // Resizing state
+  const [topHeight, setTopHeight] = useState(280); // Initial height for audit type section
+  const [isDragging, setIsDragging] = useState(false);
+  const containerRef = useRef(null);
 
+ // Resizing handlers
+  const handleMouseDown = (e: React.MouseEvent) => {
+    setIsDragging(true);
+    e.preventDefault();
+  };
 
-  // ---------------------------------------------------------------
+  const handleMouseMove = (e: MouseEvent) => {
+    if (!isDragging || !containerRef.current) return;
+    
+    const container = containerRef.current as HTMLDivElement;
+    const containerRect = container.getBoundingClientRect();
+    const headerHeight = 73; // Header height
+    const newTopHeight = e.clientY - containerRect.top - headerHeight;
+    
+    // Set min and max heights
+    const minHeight = 150;
+    const maxHeight = containerRect.height - headerHeight - 200; // Leave room for bottom section
+    
+    if (newTopHeight >= minHeight && newTopHeight <= maxHeight) {
+      setTopHeight(newTopHeight);
+    }
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  React.useEffect(() => {
+    if (isDragging) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+    }
+  }, [isDragging]);  // ---------------------------------------------------------------
 
   return (
     <div className="flex flex-col h-screen font-sans relative" style={{ background: "var(--bg)", color: "var(--text)" }}>
@@ -1520,169 +1579,194 @@ useEffect(() => {
   {/* === ADMIN: AUDITOR PANEL === */}
   {/* === ADMIN: AUDITOR PANEL === */}
 {role === "admin" && user && showAuditor && (
-  <div className="w-80 bg-slate-50 border-r border-slate-200 flex flex-col z-10 shadow-xl">
+  <div 
+      ref={containerRef}
+      className="w-80 bg-slate-50 border-r border-slate-200 flex flex-col z-10 shadow-xl min-h-screen"
+      style={{ userSelect: isDragging ? 'none' : 'auto' }}
+    >
+      {/* HEADER */}
+      <div className="p-4 bg-amber-50 border-b border-amber-100 flex-shrink-0">
+        <h3 className="font-bold text-amber-900 flex items-center gap-2">
+          <ShieldCheck size={18} /> Quality Auditor
+        </h3>
+        <p className="text-xs text-amber-700 mt-1">
+          Select an audit type to scan your manual.
+        </p>
+      </div>
 
-    {/* HEADER */}
-    <div className="p-4 bg-amber-50 border-b border-amber-100">
-      <h3 className="font-bold text-amber-900 flex items-center gap-2">
-        <ShieldCheck size={18} /> Quality Auditor
-      </h3>
-      <p className="text-xs text-amber-700 mt-1">
-        Select an audit type to scan your manual.
-      </p>
-    </div>
-
-    {/* AUDIT TYPE BUTTONS */}
-    <div className="p-4 flex flex-col gap-2">
-      <button
-        onClick={() => setAuditType("consistency")}
-        className={`p-3 text-left rounded-lg text-sm font-medium border ${
-          auditType === "consistency"
-            ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
-            : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
-        }`}
+      {/* AUDIT TYPE BUTTONS */}
+      <div className="p-4 flex flex-col gap-2 overflow-y-auto flex-shrink-0"
+      style={{ height: `${topHeight}px` }}
       >
-        <div className="flex items-center gap-2">
-          <RefreshCw size={16} /> Consistency Check
-        </div>
-        <span className="text-xs text-slate-400 font-normal mt-1 block">
-          Finds contradictions between chapters.
-        </span>
-      </button>
+        <button
+          onClick={() => setAuditType("consistency")}
+          className={`p-3 text-left rounded-lg text-sm font-medium border ${
+            auditType === "consistency"
+              ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
+              : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <RefreshCw size={16} /> Consistency Check
+          </div>
+          <span className="text-xs text-slate-400 font-normal mt-1 block">
+            Finds contradictions between chapters.
+          </span>
+        </button>
 
-      <button
-        onClick={() => setAuditType("grammar")}
-        className={`p-3 text-left rounded-lg text-sm font-medium border ${
-          auditType === "grammar"
-            ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
-            : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
-        }`}
+        <button
+          onClick={() => setAuditType("grammar")}
+          className={`p-3 text-left rounded-lg text-sm font-medium border ${
+            auditType === "grammar"
+              ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
+              : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <Edit3 size={16} /> Grammar & Tone
+          </div>
+          <span className="text-xs text-slate-400 font-normal mt-1 block">
+            Checks syntax, spelling, and voice.
+          </span>
+        </button>
+
+        <button
+          onClick={() => setAuditType("code")}
+          className={`p-3 text-left rounded-lg text-sm font-medium border ${
+            auditType === "code"
+              ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
+              : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <FileCode size={16} /> Tech & Code Review
+          </div>
+          <span className="text-xs text-slate-400 font-normal mt-1 block">
+            Validates code snippets and logic.
+          </span>
+        </button>
+
+        <button
+          onClick={runAudit}
+          disabled={isAuditing}
+          className="mt-4 bg-indigo-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-indigo-700 disabled:bg-slate-300 flex justify-center items-center gap-2"
+        >
+          {isAuditing ? "Auditing..." : "Run Audit"}
+        </button>
+      </div>
+
+      {/* RESIZABLE DIVIDER */}
+      <div
+        className="h-1 bg-slate-200 hover:bg-indigo-400 cursor-row-resize flex-shrink-0 transition-colors relative group"
+        onMouseDown={handleMouseDown}
       >
-        <div className="flex items-center gap-2">
-          <Edit3 size={16} /> Grammar & Tone
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="w-12 h-0.5 bg-slate-400 group-hover:bg-indigo-500 rounded-full"></div>
         </div>
-        <span className="text-xs text-slate-400 font-normal mt-1 block">
-          Checks syntax, spelling, and voice.
-        </span>
-      </button>
+      </div>
 
-      <button
-        onClick={() => setAuditType("code")}
-        className={`p-3 text-left rounded-lg text-sm font-medium border ${
-          auditType === "code"
-            ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
-            : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
-        }`}
-      >
-        <div className="flex items-center gap-2">
-          <FileCode size={16} /> Tech & Code Review
-        </div>
-        <span className="text-xs text-slate-400 font-normal mt-1 block">
-          Validates code snippets and logic.
-        </span>
-      </button>
+      {/* AUDIT REPORT SECTION */}
+      <div className="flex-1 h-full pb-10 overflow-y-auto p-4 bg-white">
+        <h4 className="text-xs font-bold text-slate-500 uppercase mb-3">
+          Audit Report
+        </h4>
 
-      <button
-        onClick={runAudit}
-        disabled={isAuditing}
-        className="mt-4 bg-indigo-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-indigo-700 disabled:bg-slate-300 flex justify-center items-center gap-2"
-      >
-        {isAuditing ? "Auditing..." : "Run Audit"}
-      </button>
-    </div>
+        {/* TOOLBAR: SELECT ALL + APPLY FIXES + DOWNLOAD (Grammar Only) */}
+        {auditType === "grammar" && corrections.length > 0 && (
+          <div className="sticky top-0 bg-white flex items-center justify-between my-3 pb-2">
 
-    {/* === AUDIT REPORT SECTION === */}
-    <div className="flex-1 overflow-y-auto p-4 border-t border-slate-200 bg-white">
+            {/* Select All */}
+            <label className="flex items-center gap-2 text-xs font-semibold">
+              <input
+                type="checkbox"
+                checked={selectedCorrections.size === corrections.length}
+                onChange={toggleSelectAll}
+              />
+              Select All
+            </label>
 
-      <h4 className="text-xs font-bold text-slate-500 uppercase mb-3">
-        Audit Report
-      </h4>
-
-      {/* TOOLBAR: SELECT ALL + APPLY FIXES + DOWNLOAD (Grammar Only) */}
-      {auditType === "grammar" && corrections.length > 0 && (
-        <div className="flex items-center justify-between my-3">
-
-          {/* Select All */}
-          <label className="flex items-center gap-2 text-xs font-semibold">
-            <input
-              type="checkbox"
-              checked={selectedCorrections.size === corrections.length}
-              onChange={toggleSelectAll}
-            />
-            Select All
-          </label>
-
-          {/* Apply Selected Fixes */}
-          <button
-            onClick={applyCorrections}
-            className="px-3 py-1.5 bg-emerald-600 text-white rounded text-xs hover:bg-emerald-700"
-          >
-            Apply Fixes
-          </button>
-
-          {/* Download */}
-          <button
-            onClick={handleDownloadAuditReport}
-            className="px-3 py-1.5 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700"
-          >
-            Download
-          </button>
-        </div>
-      )}
-
-      {/* No Results */}
-      {auditResults.length === 0 && !isAuditing && (
-        <p className="text-sm text-slate-400 italic">No issues found yet.</p>
-      )}
-
-      {/* ================== NON-GRAMMAR OUTPUT ================== */}
-      {auditType !== "grammar" && (
-        <div className="space-y-3">
-          {auditResults.map((res, idx) => (
-            <div
-              key={idx}
-              className="text-sm p-3 bg-red-50 border border-red-100 rounded-lg text-slate-700"
+            {/* Apply Selected Fixes */}
+            <button
+              onClick={applyCorrections}
+              className="px-3 py-1.5 bg-emerald-600 text-white rounded text-xs hover:bg-emerald-700"
             >
-              {res}
-            </div>
-          ))}
-        </div>
-      )}
+              Apply Fixes
+            </button>
 
-      {/* ================== GRAMMAR MODE OUTPUT ================== */}
-      {auditType === "grammar" && corrections.length > 0 && (
-        <div className="space-y-3 mt-4">
-          {corrections.map((pair, idx) => (
-            <div
-              key={idx}
-              className="p-3 bg-white border border-slate-200 rounded-md shadow-sm"
+            {/* Download */}
+            <button
+              onClick={handleDownloadAuditReport}
+              className="px-3 py-1.5 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700"
             >
-              {/* Checkbox */}
-              <label className="flex items-center gap-2 mb-2">
-                <input
-                  type="checkbox"
-                  checked={selectedCorrections.has(idx)}
-                  onChange={() => toggleCorrection(idx)}
-                />
-                <span className="text-xs text-slate-600">Select this correction</span>
-              </label>
+              Download
+            </button>
+          </div>
+        )}
 
-              {/* ORIGINAL */}
-              <div className="text-sm text-red-600">
-                <strong>Original:</strong> {pair.original}
+        {/* No Results */}
+        {auditResults.length === 0 && corrections.length === 0 && !isAuditing && (
+          <p className="text-sm text-slate-400 italic">No issues found yet.</p>
+        )}
+
+        {/* NON-GRAMMAR OUTPUT (Consistency + Code Review) */}
+        {auditType !== "grammar" && auditResults.length > 0 && (
+          <div className="space-y-3">
+            {/* SHOW DOWNLOAD BUTTON FOR CODE REVIEW */}
+            {auditType === "code" && (
+              <div className="flex justify-end mb-2">
+                <button
+                  onClick={handleDownloadAuditReport}
+                  className="px-3 py-1.5 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700"
+                >
+                  Download
+                </button>
               </div>
+            )}
 
-              {/* CORRECTED */}
-              <div className="text-sm text-green-700">
-                <strong>Corrected:</strong> {pair.corrected}
+            {auditResults.map((res, idx) => (
+              <div
+                key={idx}
+                className="text-sm p-3 bg-red-50 border border-red-100 rounded-lg text-slate-700"
+              >
+                {res}
               </div>
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
 
+        {/* GRAMMAR MODE OUTPUT */}
+        {auditType === "grammar" && corrections.length > 0 && (
+          <div className="space-y-3 mt-4">
+            {corrections.map((pair, idx) => (
+              <div
+                key={idx}
+                className="p-3 bg-white border border-slate-200 rounded-md shadow-sm"
+              >
+                {/* Checkbox */}
+                <label className="flex items-center gap-2 mb-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedCorrections.has(idx)}
+                    onChange={() => toggleCorrection(idx)}
+                  />
+                  <span className="text-xs text-slate-600">Select this correction</span>
+                </label>
+
+                {/* ORIGINAL */}
+                <div className="text-sm text-red-600">
+                  <strong>Original:</strong> {pair.original}
+                </div>
+
+                {/* CORRECTED */}
+                <div className="text-sm text-green-700">
+                  <strong>Corrected:</strong> {pair.corrected}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
-  </div>
 )}
 
 
