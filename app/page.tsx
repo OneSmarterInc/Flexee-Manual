@@ -110,6 +110,13 @@ const restoreCursorPosition = (el: HTMLElement, caretOffset: number) => {
   selection.removeAllRanges();
   selection.addRange(range);
 };
+const safeRestoreCursor = (el: HTMLElement, pos: number | null) => {
+  requestAnimationFrame(() => {
+    if (pos !== null) {
+      restoreCursorPosition(el, pos);
+    }
+  });
+};
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -165,7 +172,6 @@ const ToolbarButton: FC<ToolbarButtonProps> = ({
     <Icon size={18} />
   </button>
 );
-
 const handleEnter = (e: React.KeyboardEvent<HTMLDivElement>) => {
   if (e.key !== "Enter") return;
 
@@ -290,6 +296,29 @@ const [undoVisible, setUndoVisible] = useState(false);
 
   // Auditor State
   const [auditResults, setAuditResults] = useState<string[]>([]);
+  const [corrections, setCorrections] = useState<
+  { original: string; corrected: string }[]
+>([]);
+
+const [selectedCorrections, setSelectedCorrections] = useState<Set<number>>(new Set());
+const toggleCorrection = (index: number) => {
+  setSelectedCorrections(prev => {
+    const updated = new Set(prev);
+    if (updated.has(index)) updated.delete(index);
+    else updated.add(index);
+    return updated;
+  });
+};
+
+const toggleSelectAll = () => {
+  if (selectedCorrections.size === corrections.length) {
+    setSelectedCorrections(new Set());
+  } else {
+    setSelectedCorrections(new Set(corrections.map((_, i) => i)));
+  }
+};
+
+
   const [auditType, setAuditType] = useState<'consistency' | 'grammar' | 'code'>(
     'consistency'
   );
@@ -299,6 +328,7 @@ const [undoVisible, setUndoVisible] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const editingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastCursorPositionRef = useRef<number | null>(null);
+  const typingRef = useRef(false);
 
   // --- Text Formatting State ---
   const [formatState, setFormatState] = useState({
@@ -329,10 +359,29 @@ const [undoVisible, setUndoVisible] = useState(false);
   };
 
   // --- Initialization ---
-  useEffect(() => {
-    const savedKey = "AIzaSyDDkxZ0WaYq2w9wY4ONWAsjdEMVqhsr8jc";
-    if (savedKey) setApiKey(savedKey);
-  }, []);
+  // useEffect(() => {
+  //   const savedKey = "AIzaSyDDkxZ0WaYq2w9wY4ONWAsjdEMVqhsr8jc";
+  //   if (savedKey) setApiKey(savedKey);
+  // }, []);
+
+useEffect(() => {
+  // Read key injected at build time by Next.js
+  const envKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY as string | undefined;
+  // console.log("Loaded Gemini API Key from env:", envKey);
+  // Optionally fallback to a saved key in localStorage (if you used that before)
+  const savedKey = envKey ?? localStorage.getItem('flexee_api_key') ?? '';
+
+  if (savedKey) {
+    setApiKey(savedKey);
+    // Keep localStorage for convenience (optional)
+    try {
+      localStorage.setItem('flexee_api_key', savedKey);
+    } catch (e) {
+      // ignore if storage not available
+    }
+  }
+}, []);
+
   useEffect(() => {
   const handleClick = () => {
     if (undoVisible) setUndoVisible(false);
@@ -445,34 +494,52 @@ useEffect(() => {
   const ref = doc(db, 'manualPages', activePageId);
 
   const unsub = onSnapshot(ref, (snap) => {
-    if (snap.exists()) {
-      const data = snap.data() as { content?: string };
+    if (!snap.exists()) return;
 
-      if (data.content && !isEditing) {
-        const clean = sanitizeBidi(data.content);
+    const data = snap.data() as { content?: string };
+    const clean = sanitizeBidi(data.content || "");
 
-        if (clean !== content) {
-          setContent(clean);
+    // ⛔ NEW — Prevent overwrite while admin is typing (avoids cursor jump)
+    if (typingRef.current) return;
+    // Prevent Firestore overwrite when grammar highlights are visible
+const grammarActive =
+  auditType === "grammar" &&
+  corrections.length > 0 &&
+  editorRef.current?.innerHTML.includes('grammar-error');
 
-          if (editorRef.current) {
-            const cursorPos = saveCursorPosition(editorRef.current);
-            lastCursorPositionRef.current = cursorPos;
+if (grammarActive) return;
 
-            editorRef.current.innerHTML = clean;
 
-            setTimeout(() => {
-              if (cursorPos !== null && editorRef.current) {
-                restoreCursorPosition(editorRef.current, cursorPos);
-              }
-            }, 10);
-          }
-        }
-      }
+    // Do nothing if content is already up-to-date
+    if (clean === content) return;
+
+    // Update React state
+    setContent(clean);
+
+    // Update editor only if it exists
+    if (editorRef.current) {
+      const el = editorRef.current;
+
+      // Save cursor before updating DOM
+      const cursorPos = saveCursorPosition(el);
+      lastCursorPositionRef.current = cursorPos;
+
+      // Replace content safely
+      el.innerHTML = clean;
+
+      // Restore cursor after DOM update
+    
+      if (editorRef.current) {
+  safeRestoreCursor(editorRef.current, cursorPos);
+}
+
+      
     }
   });
 
   return () => unsub();
-}, [activePageId, isEditing, content]);
+}, [activePageId, content]);
+
 
   // --- Ensure editor always shows content when returning to admin mode ---
   useEffect(() => {
@@ -484,7 +551,11 @@ useEffect(() => {
   // --- Much improved input handler with typing detection ---
   const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
     if (role !== 'admin') return;
-
+      // NEW → mark that admin is typing
+  typingRef.current = true;
+  setTimeout(() => {
+    typingRef.current = false;
+  }, 800);
     // Set editing state
     setIsEditing(true);
     
@@ -743,7 +814,7 @@ setUndoVisible(true);
     console.error(error);
     return "Error connecting to AI.";
   }
-};``
+};
 
 
   const handleUserChat = async () => {
@@ -782,9 +853,15 @@ setUndoVisible(true);
         List specific discrepancies found. If none, say "No inconsistencies found."
         Manual Content: ${manualText}`;
     } else if (auditType === 'grammar') {
-      prompt = `Act as a professional editor. Scan the text for grammatical errors, awkward phrasing, or informal tone. 
-        List the errors and the suggested correction.
-        Manual Content: ${manualText}`;
+  prompt = `Identify grammar mistakes and return corrections in this exact format:
+
+Original: <wrong sentence>
+Corrected: <correct sentence>
+
+Return ONLY pairs. No explanations.
+
+Manual Content:
+${manualText}`;
     } else if (auditType === 'code') {
       prompt = `Scan the text for any technical instructions or code snippets. 
         Verify if they look syntactically correct and logical. 
@@ -793,13 +870,205 @@ setUndoVisible(true);
     }
 
     const result = await callGemini('You are an expert Technical Auditor.', prompt);
+if (auditType === "grammar") {
+  const lines = (result || "").split("\n");
+  const list: { original: string; corrected: string }[] = [];
 
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("Original:")) {
+      const original = lines[i].replace("Original:", "").trim();
+      const corrected = lines[i + 1]?.replace("Corrected:", "").trim();
+      if (original && corrected) {
+        list.push({ original, corrected });
+      }
+    }
+  }
+
+  setCorrections(list);
+   // 🔥 highlight errors inside editor
+ 
+}
     const formattedResults = result
       ? result.split('\n').filter((line: string) => line.trim().length > 0)
       : ['No response from Auditor.'];
     setAuditResults(formattedResults);
     setIsAuditing(false);
   };
+const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require("docx");
+const saveAs = require("file-saver").saveAs;
+
+const handleDownloadAuditReport = async () => {
+  if (!auditResults || auditResults.length === 0) {
+    alert("No audit results available to download.");
+    return;
+  }
+
+  let children = [];
+
+  // --- TITLE ---
+  children.push(
+    new Paragraph({
+      text: "FLEXEE AI AUDIT REPORT",
+      heading: HeadingLevel.TITLE,
+      spacing: { after: 300 },
+    })
+  );
+
+  // --- AUDIT TYPE ---
+  children.push(
+    new Paragraph({
+      children: [
+        new TextRun({ text: "Audit Type: ", bold: true, size: 28 }),
+        new TextRun({
+          text: auditType.toUpperCase(),
+          color: "1E90FF",
+          bold: true,
+          size: 28,
+        }),
+      ],
+      spacing: { after: 200 },
+    })
+  );
+
+  // --- DATE ---
+  children.push(
+    new Paragraph({
+      text: `Generated On: ${new Date().toLocaleString()}`,
+      spacing: { after: 400 },
+    })
+  );
+
+  // --- SECTION HEADER ---
+  children.push(
+    new Paragraph({
+      text: "Audit Findings",
+      heading: HeadingLevel.HEADING_1,
+      spacing: { after: 200 },
+    })
+  );
+
+  // -------------------------------------------------------------------
+  //               CONSISTENCY MODE (Highlight keywords only)
+  // -------------------------------------------------------------------
+
+  if (auditType === "consistency") {
+    auditResults.forEach((line) => {
+      const keywords = line.match(/\b[A-Z0-9]+\b/g) || []; // detect IMPORTANT words
+
+      let parts = [];
+      let remaining = line;
+
+      keywords.forEach((key) => {
+        const idx = remaining.indexOf(key);
+        if (idx !== -1) {
+          // normal text before keyword
+          parts.push(new TextRun(remaining.substring(0, idx)));
+
+          // highlighted keyword only
+          parts.push(
+            new TextRun({
+              text: key,
+              highlight: "yellow",
+              bold: true,
+            })
+          );
+
+          remaining = remaining.substring(idx + key.length);
+        }
+      });
+
+      parts.push(new TextRun(remaining));
+
+      children.push(
+        new Paragraph({
+          children: parts,
+          spacing: { after: 200 },
+        })
+      );
+    });
+  }
+
+  // -------------------------------------------------------------------
+  //               GRAMMAR MODE (Original = Red, Corrected = Green)
+  // -------------------------------------------------------------------
+
+if (auditType === "grammar" && corrections.length > 0) {
+  corrections.forEach((pair) => {
+
+    // ORIGINAL (only the word Original is red)
+    children.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: "Original",
+            color: "FF0000", // red
+            bold: true,
+          }),
+          new TextRun({
+            text: ": " + pair.original, 
+            color: "000000", // black normal text
+          }),
+        ],
+        spacing: { after: 150 },
+      })
+    );
+
+    // CORRECTED (only the word Corrected is green)
+    children.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: "Corrected",
+            color: "008000", // green
+            bold: true,
+          }),
+          new TextRun({
+            text: ": " + pair.corrected,
+            color: "000000", // black normal text
+          }),
+        ],
+        spacing: { after: 300 },
+      })
+    );
+
+  });
+}
+
+
+  // -------------------------------------------------------------------
+  //               DEFAULT MODE (Technical / Code Review)
+  // -------------------------------------------------------------------
+
+  if (auditType === "code") {
+    auditResults.forEach((line) => {
+      children.push(
+        new Paragraph({
+          children: [
+            new TextRun({ text: "• ", bold: true }),
+            new TextRun({
+              text: line,
+              color: "FF0000",
+              highlight: "yellow",
+            }),
+          ],
+          spacing: { after: 150 },
+        })
+      );
+    });
+  }
+
+  // -------------------------------------------------------------------
+  //               MAKE DOCUMENT + DOWNLOAD
+  // -------------------------------------------------------------------
+
+  const doc = new Document({
+    sections: [{ children }],
+  });
+
+  const blob = await Packer.toBlob(doc);
+  saveAs(blob, `flexee-audit-report-${Date.now()}.docx`);
+};
+
 
   // ------------------- THEME LOGIC -------------------
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -841,7 +1110,21 @@ setUndoVisible(true);
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
+const handleDownloadFullDocument = () => {
+  const html = editorRef.current ? editorRef.current.innerHTML : content;
 
+  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "flexee-full-document.html";
+  document.body.appendChild(a);
+  a.click();
+
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
   type Chapter = { title: string; html: string };
   type WorkingChapter = {
   title: string;
@@ -933,6 +1216,129 @@ setUndoVisible(true);
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
+  // -----------------------------------------------------
+// Highlight original grammar errors in red
+// -----------------------------------------------------
+const highlightOriginalErrors = () => {
+  // 🔒 1. Don't run while admin is typing
+  if (typingRef.current) return;
+
+  // 🔒 2. If editor isn't mounted, just skip
+  if (!editorRef.current) return;
+
+  // 3. Save cursor position BEFORE modifying HTML
+  const caret = saveCursorPosition(editorRef.current);
+  let html = editorRef.current.innerHTML;
+
+  // 4. Wrap each "original" text with red highlight span
+  corrections.forEach(({ original }) => {
+    if (!original) return;
+
+    const safeOriginal = original.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(safeOriginal, "g");
+
+    html = html.replace(
+      regex,
+      `<span class="grammar-error" style="background-color:#ffcccc;color:red;">${original}</span>`
+    );
+  });
+
+  // If editor disappeared in between, bail out
+  if (!editorRef.current) return;
+
+  // 5. Replace HTML
+  editorRef.current.innerHTML = html;
+
+  // 6. Restore cursor in the next animation frame
+  safeRestoreCursor(editorRef.current, caret);
+};
+
+const applyCorrections = () => {
+  // 1. Don't run while typing
+  if (typingRef.current) return;
+
+  // 2. Editor must exist
+  if (!editorRef.current) return;
+
+  // 3. Save cursor before modifying HTML
+  const caret = saveCursorPosition(editorRef.current);
+
+  let html = editorRef.current.innerHTML;
+
+  selectedCorrections.forEach((idx) => {
+    const { original, corrected } = corrections[idx];
+    if (!original || !corrected) return;
+
+    // Escape special characters for regex
+    const safeOriginal = original.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // Match grammar error span containing the original text
+    const regex = new RegExp(
+      `<span[^>]*class=["']grammar-error["'][^>]*>${safeOriginal}</span>`,
+      "g"
+    );
+
+    html = html.replace(
+      regex,
+      `<span class="grammar-fixed" style="background-color:#ccffcc;color:green;">${corrected}</span>`
+    );
+  });
+editorRef.current.innerHTML = html;
+  safeRestoreCursor(editorRef.current, caret);
+  debouncedUpdate(html, activePageId);
+
+  alert("Selected grammar corrections applied!");
+};
+
+
+useEffect(() => {
+  if (!editorRef.current) return;
+
+  // run highlight ONLY once AFTER Run Audit is clicked
+  if (auditType === "grammar" && corrections.length > 0 && isAuditing === false) {
+    setTimeout(() => {
+      highlightOriginalErrors();
+    }, 50);
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [corrections]);
+
+useEffect(() => {
+  const handleClickOutside = (event: MouseEvent) => {
+    if (!editorRef.current) return;
+
+    const editorEl = editorRef.current;
+
+    // 🔹 Click INSIDE editor → do nothing
+    if (editorEl.contains(event.target as Node)) return;
+
+    let html = editorEl.innerHTML;
+
+    // Remove RED "grammar-error" spans
+    html = html.replace(
+      /<span[^>]*class=["']grammar-error["'][^>]*>(.*?)<\/span>/g,
+      "$1"
+    );
+
+    // Remove GREEN "grammar-fixed" spans
+    html = html.replace(
+      /<span[^>]*class=["']grammar-fixed["'][^>]*>(.*?)<\/span>/g,
+      "$1"
+    );
+
+    // Update only if something changed
+    if (html !== editorEl.innerHTML) {
+      const caret = saveCursorPosition(editorEl);
+      editorEl.innerHTML = html;
+      safeRestoreCursor(editorEl, caret);
+    }
+  };
+
+  document.addEventListener("click", handleClickOutside);
+  return () => document.removeEventListener("click", handleClickOutside);
+}, []);
+
+
 
   // ---------------------------------------------------------------
 
@@ -1109,96 +1515,177 @@ setUndoVisible(true);
         </div>
       </header>
 
-      {/* Main Workspace */}
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* === ADMIN: AUDITOR PANEL === */}
-        {role === 'admin' && user && showAuditor && (
-          <div className="w-80 bg-slate-50 border-r border-slate-200 flex flex-col z-10 shadow-xl">
-            <div className="p-4 bg-amber-50 border-b border-amber-100">
-              <h3 className="font-bold text-amber-900 flex items-center gap-2">
-                <ShieldCheck size={18} /> Quality Auditor
-              </h3>
-              <p className="text-xs text-amber-700 mt-1">
-                Select an audit type to scan your manual.
-              </p>
+{/* Main Workspace */}
+<div className="flex-1 flex overflow-hidden relative">
+  {/* === ADMIN: AUDITOR PANEL === */}
+  {/* === ADMIN: AUDITOR PANEL === */}
+{role === "admin" && user && showAuditor && (
+  <div className="w-80 bg-slate-50 border-r border-slate-200 flex flex-col z-10 shadow-xl">
+
+    {/* HEADER */}
+    <div className="p-4 bg-amber-50 border-b border-amber-100">
+      <h3 className="font-bold text-amber-900 flex items-center gap-2">
+        <ShieldCheck size={18} /> Quality Auditor
+      </h3>
+      <p className="text-xs text-amber-700 mt-1">
+        Select an audit type to scan your manual.
+      </p>
+    </div>
+
+    {/* AUDIT TYPE BUTTONS */}
+    <div className="p-4 flex flex-col gap-2">
+      <button
+        onClick={() => setAuditType("consistency")}
+        className={`p-3 text-left rounded-lg text-sm font-medium border ${
+          auditType === "consistency"
+            ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
+            : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <RefreshCw size={16} /> Consistency Check
+        </div>
+        <span className="text-xs text-slate-400 font-normal mt-1 block">
+          Finds contradictions between chapters.
+        </span>
+      </button>
+
+      <button
+        onClick={() => setAuditType("grammar")}
+        className={`p-3 text-left rounded-lg text-sm font-medium border ${
+          auditType === "grammar"
+            ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
+            : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <Edit3 size={16} /> Grammar & Tone
+        </div>
+        <span className="text-xs text-slate-400 font-normal mt-1 block">
+          Checks syntax, spelling, and voice.
+        </span>
+      </button>
+
+      <button
+        onClick={() => setAuditType("code")}
+        className={`p-3 text-left rounded-lg text-sm font-medium border ${
+          auditType === "code"
+            ? "bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700"
+            : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300"
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <FileCode size={16} /> Tech & Code Review
+        </div>
+        <span className="text-xs text-slate-400 font-normal mt-1 block">
+          Validates code snippets and logic.
+        </span>
+      </button>
+
+      <button
+        onClick={runAudit}
+        disabled={isAuditing}
+        className="mt-4 bg-indigo-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-indigo-700 disabled:bg-slate-300 flex justify-center items-center gap-2"
+      >
+        {isAuditing ? "Auditing..." : "Run Audit"}
+      </button>
+    </div>
+
+    {/* === AUDIT REPORT SECTION === */}
+    <div className="flex-1 overflow-y-auto p-4 border-t border-slate-200 bg-white">
+
+      <h4 className="text-xs font-bold text-slate-500 uppercase mb-3">
+        Audit Report
+      </h4>
+
+      {/* TOOLBAR: SELECT ALL + APPLY FIXES + DOWNLOAD (Grammar Only) */}
+      {auditType === "grammar" && corrections.length > 0 && (
+        <div className="flex items-center justify-between my-3">
+
+          {/* Select All */}
+          <label className="flex items-center gap-2 text-xs font-semibold">
+            <input
+              type="checkbox"
+              checked={selectedCorrections.size === corrections.length}
+              onChange={toggleSelectAll}
+            />
+            Select All
+          </label>
+
+          {/* Apply Selected Fixes */}
+          <button
+            onClick={applyCorrections}
+            className="px-3 py-1.5 bg-emerald-600 text-white rounded text-xs hover:bg-emerald-700"
+          >
+            Apply Fixes
+          </button>
+
+          {/* Download */}
+          <button
+            onClick={handleDownloadAuditReport}
+            className="px-3 py-1.5 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700"
+          >
+            Download
+          </button>
+        </div>
+      )}
+
+      {/* No Results */}
+      {auditResults.length === 0 && !isAuditing && (
+        <p className="text-sm text-slate-400 italic">No issues found yet.</p>
+      )}
+
+      {/* ================== NON-GRAMMAR OUTPUT ================== */}
+      {auditType !== "grammar" && (
+        <div className="space-y-3">
+          {auditResults.map((res, idx) => (
+            <div
+              key={idx}
+              className="text-sm p-3 bg-red-50 border border-red-100 rounded-lg text-slate-700"
+            >
+              {res}
             </div>
+          ))}
+        </div>
+      )}
 
-            <div className="p-4 flex flex-col gap-2">
-              <button
-                onClick={() => setAuditType('consistency')}
-                className={`p-3 text-left rounded-lg text-sm font-medium border ${
-                  auditType === 'consistency'
-                    ? 'bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700'
-                    : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <RefreshCw size={16} /> Consistency Check
-                </div>
-                <span className="text-xs text-slate-400 font-normal mt-1 block">
-                  Finds contradictions between chapters.
-                </span>
-              </button>
-              <button
-                onClick={() => setAuditType('grammar')}
-                className={`p-3 text-left rounded-lg text-sm font-medium border ${
-                  auditType === 'grammar'
-                    ? 'bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700'
-                    : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <Edit3 size={16} /> Grammar & Tone
-                </div>
-                <span className="text-xs text-slate-400 font-normal mt-1 block">
-                  Checks syntax, spelling, and voice.
-                </span>
-              </button>
-              <button
-                onClick={() => setAuditType('code')}
-                className={`p-3 text-left rounded-lg text-sm font-medium border ${
-                  auditType === 'code'
-                    ? 'bg-white border-indigo-500 ring-1 ring-indigo-500 text-indigo-700'
-                    : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <FileCode size={16} /> Tech & Code Review
-                </div>
-                <span className="text-xs text-slate-400 font-normal mt-1 block">
-                  Validates code snippets and logic.
-                </span>
-              </button>
+      {/* ================== GRAMMAR MODE OUTPUT ================== */}
+      {auditType === "grammar" && corrections.length > 0 && (
+        <div className="space-y-3 mt-4">
+          {corrections.map((pair, idx) => (
+            <div
+              key={idx}
+              className="p-3 bg-white border border-slate-200 rounded-md shadow-sm"
+            >
+              {/* Checkbox */}
+              <label className="flex items-center gap-2 mb-2">
+                <input
+                  type="checkbox"
+                  checked={selectedCorrections.has(idx)}
+                  onChange={() => toggleCorrection(idx)}
+                />
+                <span className="text-xs text-slate-600">Select this correction</span>
+              </label>
 
-              <button
-                onClick={runAudit}
-                disabled={isAuditing}
-                className="mt-4 bg-indigo-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-indigo-700 disabled:bg-slate-300 flex justify-center items-center gap-2"
-              >
-                {isAuditing ? 'Auditing...' : 'Run Audit'}
-              </button>
-            </div>
+              {/* ORIGINAL */}
+              <div className="text-sm text-red-600">
+                <strong>Original:</strong> {pair.original}
+              </div>
 
-            <div className="flex-1 overflow-y-auto p-4 border-t border-slate-200 bg-white">
-              <h4 className="text-xs font-bold text-slate-500 uppercase mb-3">
-                Audit Report
-              </h4>
-              {auditResults.length === 0 && !isAuditing && (
-                <p className="text-sm text-slate-400 italic">No issues found yet.</p>
-              )}
-              <div className="space-y-3">
-                {auditResults.map((res, idx) => (
-                  <div
-                    key={idx}
-                    className="text-sm p-3 bg-red-50 border border-red-100 rounded-lg text-slate-700"
-                  >
-                    {res}
-                  </div>
-                ))}
+              {/* CORRECTED */}
+              <div className="text-sm text-green-700">
+                <strong>Corrected:</strong> {pair.corrected}
               </div>
             </div>
-          </div>
-        )}
+          ))}
+        </div>
+      )}
+
+    </div>
+  </div>
+)}
+
+
 
         {/* === MAIN CONTENT AREA === */}
         <div className="flex-1 flex flex-col relative overflow-hidden bg-white">
@@ -1631,4 +2118,4 @@ setUndoVisible(true);
   );
 };
 
-export default App;
+export default App;  
